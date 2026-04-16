@@ -40,7 +40,7 @@ For full details, see the [paper](https://arxiv.org/abs/2604.01193).
 - **[2026-04-03]** 🚀 Initial release of repository  
 - **[2026-04-03]** 🤗 Model checkpoints coming soon on Hugging Face
 - **[2026-04-07]** 🤗 Model checkpoints released
-- **[2026-04-22]** Target date for data generation pipeline to be released
+- **[2026-04-16]** 🔧 Data generation pipeline released
 - *(More updates will be added here)*
 
 ---
@@ -50,9 +50,10 @@ For full details, see the [paper](https://arxiv.org/abs/2604.01193).
 ```bash
 git clone https://github.com/apple/ml-ssd.git
 cd ml-ssd
-uv sync --group evaluation
+uv sync --group evaluation          # for evaluation only
+uv sync --group data-generation     # for data generation only
+uv sync --group evaluation --group data-generation  # for both
 ```
-
 
 <details>
 <summary>Evaluation commands</summary>
@@ -72,6 +73,18 @@ python evaluation/eval.py \
 
 </details>
 
+<details>
+<summary>Data generation</summary>
+
+```bash
+source .venv/bin/activate
+python data_generation/generate.py --config data_generation/config.yaml
+```
+
+This runs the full pipeline end-to-end: loads the dataset, generates solutions with vLLM, and post-processes into chat-template JSONL for SFT training. Edit `data_generation/config.yaml` to change the model, dataset, sampling temperature, etc.
+
+</details>
+
 ## 🤗 Models
 | Model | HuggingFace |
 |:---|:---|
@@ -82,6 +95,10 @@ python evaluation/eval.py \
 ## 📁 Repository Structure
 
 ```
+├── data_generation/
+│   ├── generate.py              # End-to-end data generation pipeline
+│   ├── config.yaml              # Generation & post-processing config
+│   └── templates/               # Prompt templates
 ├── evaluation/
 │   ├── eval.py                  # CLI entry point
 │   ├── benchmark.py             # LiveCodeBench v6 implementation
