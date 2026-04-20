@@ -18,7 +18,7 @@ import yaml
 from datasets import Dataset, load_dataset
 from huggingface_hub import HfApi
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 # =============================================================================
 # Data Loading
@@ -231,18 +231,19 @@ def generate(config: Dict[str, Any], template_dir: str, limit: int = 0):
         ).to(model.device)
         prompt_len = inputs["input_ids"].shape[1]
 
+        gen_config = GenerationConfig(
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            do_sample=True,
+            eos_token_id=stop_token_ids or tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        )
+
         with torch.no_grad():
-            output_ids = model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                do_sample=True,
-                eos_token_id=stop_token_ids or tokenizer.eos_token_id,
-                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
-            )
+            output_ids = model.generate(**inputs, generation_config=gen_config)
 
         for i, ex in enumerate(batch):
             generated = output_ids[i][prompt_len:]
