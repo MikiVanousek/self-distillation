@@ -15,7 +15,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 import yaml
-from datasets import load_dataset
+from datasets import Dataset, load_dataset
+from huggingface_hub import HfApi
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -134,6 +135,7 @@ def generate(config: Dict[str, Any], template_dir: str, limit: int = 0):
     dataset_split = config['dataset'].get('split', 'train')
 
     output_dir = config['output']['path']
+    hf_repo = config['output'].get('hf_repo')
 
     temperature = config['generation'].get('temperature', 1.6)
     top_k = config['generation'].get('top_k', 20)
@@ -316,6 +318,25 @@ def generate(config: Dict[str, Any], template_dir: str, limit: int = 0):
     print(f"  Filtered:       {filtered}")
     print(f"  Output:         {jsonl_path}")
 
+    # ===== STAGE 4: Upload to Hugging Face Hub =====
+    if hf_repo:
+        print("\n" + "=" * 60)
+        print(f"STAGE 4: Upload to Hugging Face Hub ({hf_repo})")
+        stage4_start = time.time()
+
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            records = [json.loads(line) for line in f]
+
+        conversations = [record["messages"] for record in records]
+        hf_dataset = Dataset.from_dict({"messages": conversations})
+
+        hf_dataset.push_to_hub(hf_repo, private=False)
+
+        print(f"STAGE 4 complete in {time.time() - stage4_start:.1f}s")
+        print(f"  Uploaded {len(hf_dataset)} conversations to https://huggingface.co/datasets/{hf_repo}")
+    else:
+        print("\nSkipping HF upload (no hf_repo configured)")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Generate solutions for coding problems using vLLM")
@@ -324,6 +345,7 @@ def main():
     parser.add_argument("--model-name", type=str, help="Override model name")
     parser.add_argument("--dataset-name", type=str, help="Override HuggingFace dataset name")
     parser.add_argument("--output-path", type=str, help="Override output path")
+    parser.add_argument("--hf-repo", type=str, help="Override HF repo to upload dataset to")
     parser.add_argument("--limit", type=int, default=0, help="Limit number of examples (0 = all)")
     args = parser.parse_args()
 
@@ -344,6 +366,8 @@ def main():
         config['dataset']['name'] = args.dataset_name
     if args.output_path:
         config['output']['path'] = args.output_path
+    if args.hf_repo:
+        config['output']['hf_repo'] = args.hf_repo
 
     # Resolve template directory (templates/ next to this script)
     script_dir = os.path.dirname(os.path.abspath(__file__))

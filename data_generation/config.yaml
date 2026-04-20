@@ -12,6 +12,7 @@ dataset:
 
 output:
   path: "./output"
+  hf_repo: "MikiV/Qwen3-4B-Instruct-rStar-Coder-Replies"
 
 generation:
   temperature: 1.5
