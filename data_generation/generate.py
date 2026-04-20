@@ -145,6 +145,14 @@ def generate(config: Dict[str, Any], template_dir: str, limit: int = 0):
 
     filter_percent = config.get('post_process', {}).get('filter_shortest_percent', 10.0)
 
+    if hf_repo:
+        hf_token = os.environ.get("HF_TOKEN") or HfApi().token
+        if not hf_token:
+            print("Error: HF upload requested but no Hugging Face token found.\n"
+                  "  Set HF_TOKEN env var or run `huggingface-cli login`.")
+            sys.exit(1)
+        print(f"HF upload: {hf_repo} (token found)")
+
     print(f"Model: {model_name}")
     print(f"Dataset: {dataset_name}/{dataset_config} (split: {dataset_split})")
     print(f"Output: {output_dir}")
