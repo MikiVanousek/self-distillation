@@ -13,9 +13,11 @@ from typing import Any, Dict, List, Tuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import torch
 import yaml
 from datasets import load_dataset
-from vllm import LLM, SamplingParams
+from tqdm import tqdm
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # =============================================================================
 # Data Loading
@@ -60,6 +62,63 @@ def load_templates(template_dir: str) -> Tuple[str, str]:
         function_template = f.read()
 
     return stdin_template, function_template
+
+
+def _find_batch_size(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    examples: List[Dict[str, Any]],
+    max_new_tokens: int,
+) -> int:
+    """Binary-search for the largest batch size that fits in GPU memory.
+
+    Runs a short dummy forward+generate pass at each candidate size,
+    catches OOM, and backs off.  Returns at least 1.
+    """
+    device = next(model.parameters()).device
+    if device.type != "cuda":
+        return 1
+
+    median_prompt_len = sorted(
+        len(tokenizer.encode(ex["prompt"], add_special_tokens=False))
+        for ex in examples
+    )[len(examples) // 2]
+    # Cap the trial generation length so probing is fast
+    trial_gen_tokens = min(max_new_tokens, 32)
+
+    dummy_ids = torch.full(
+        (1, median_prompt_len), tokenizer.eos_token_id or 0,
+        dtype=torch.long, device=device,
+    )
+    attn_mask = torch.ones_like(dummy_ids)
+
+    lo, hi, best = 1, 128, 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        ids = dummy_ids.expand(mid, -1).contiguous()
+        mask = attn_mask.expand(mid, -1).contiguous()
+        try:
+            torch.cuda.empty_cache()
+            with torch.no_grad():
+                model.generate(
+                    input_ids=ids,
+                    attention_mask=mask,
+                    max_new_tokens=trial_gen_tokens,
+                    do_sample=False,
+                    pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+                )
+            best = mid
+            lo = mid + 1
+        except torch.cuda.OutOfMemoryError:
+            hi = mid - 1
+        finally:
+            torch.cuda.empty_cache()
+
+    # Leave ~20% headroom for variable-length prompts
+    batch_size = max(1, int(best * 0.8))
+    print(f"  Auto batch size: {batch_size}  (probed max {best}, "
+          f"median prompt {median_prompt_len} tokens)")
+    return batch_size
 
 
 def generate(config: Dict[str, Any], template_dir: str, limit: int = 0):
@@ -127,34 +186,57 @@ def generate(config: Dict[str, Any], template_dir: str, limit: int = 0):
     print("STAGE 1: Generate solutions")
     stage1_start = time.time()
 
-    print(f"Initializing vLLM (model: {model_name}, TP={tp_size})...")
-    llm = LLM(
-        model=model_name,
-        tensor_parallel_size=tp_size,
-        gpu_memory_utilization=gpu_mem,
-        max_model_len=max_tokens,
-        dtype="bfloat16",
+    print(f"Loading model: {model_name} ...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
         trust_remote_code=True,
-        enforce_eager=False,
     )
+    model.eval()
+
+    stop_token_ids = [
+        tid for token in ["<|im_end|>", "<|endoftext|>"]
+        if (tid := tokenizer.convert_tokens_to_ids(token)) is not None
+        and tid != tokenizer.unk_token_id
+    ]
 
     print(f"Generating solutions for {len(examples)} examples...")
 
-    sampling_params = SamplingParams(
-        temperature=temperature,
-        top_k=top_k,
-        top_p=top_p,
-        repetition_penalty=repetition_penalty,
-        max_tokens=max_tokens,
-        skip_special_tokens=True,
-        stop=["<|im_end|>", "<|endoftext|>"],
-    )
+    batch_size = _find_batch_size(model, tokenizer, examples, max_tokens)
 
-    prompts = [ex['prompt'] for ex in examples]
-    outputs = llm.generate(prompts=prompts, sampling_params=sampling_params, use_tqdm=True)
+    for batch_start in tqdm(range(0, len(examples), batch_size)):
+        batch = examples[batch_start : batch_start + batch_size]
+        prompts = [ex['prompt'] for ex in batch]
 
-    for ex, output in zip(examples, outputs):
-        ex['output'] = output.outputs[0].text.strip()
+        messages_batch = [[{"role": "user", "content": p}] for p in prompts]
+        texts = [
+            tokenizer.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
+            for m in messages_batch
+        ]
+
+        inputs = tokenizer(
+            texts, return_tensors="pt", padding=True, truncation=True
+        ).to(model.device)
+        prompt_len = inputs["input_ids"].shape[1]
+
+        with torch.no_grad():
+            output_ids = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                top_k=top_k,
+                top_p=top_p,
+                repetition_penalty=repetition_penalty,
+                do_sample=True,
+                eos_token_id=stop_token_ids or tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            )
+
+        for i, ex in enumerate(batch):
+            generated = output_ids[i][prompt_len:]
+            ex['output'] = tokenizer.decode(generated, skip_special_tokens=True).strip()
 
     print(f"STAGE 1 complete: {len(examples)} generated in {time.time() - stage1_start:.1f}s")
 
